@@ -6,33 +6,29 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
     public function up(): void
     {
-        Schema::create('gestures', function (Blueprint $table) {
+        Schema::create('gesture_samples', function (Blueprint $table) {
 
             $table->id();
+
+            $table->foreignId('gesture_profile_id')
+                ->constrained()
+                ->onDelete('cascade');
 
             $table->integer('f1');
             $table->integer('f2');
 
             $table->integer('ax');
             $table->integer('ay');
-
-            $table->string('label');
+            $table->integer('az');
 
             $table->timestamps();
-
         });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
-        Schema::dropIfExists('gestures');
+        Schema::dropIfExists('gesture_samples');
     }
 };

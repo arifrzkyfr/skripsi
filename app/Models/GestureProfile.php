@@ -21,9 +21,4 @@ class GestureProfile extends Model
         'avg_ay',
         'avg_az',
     ];
-
-    public function samples()
-    {
-        return $this->hasMany(GestureSample::class);
-    }
 }
