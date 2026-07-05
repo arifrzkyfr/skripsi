@@ -1,44 +1,57 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
+import {
+    LineChart,
+    Line,
+    XAxis,
+    YAxis,
+    CartesianGrid,
+    Tooltip,
+    Legend,
+    ResponsiveContainer,
+} from "recharts";
 
 export default function Gestur() {
-    // =================================================
-    // STATE
-    // =================================================
+    // =====================================
+    // STATE KONEKSI LOKAL (TANPA CONTEXT)
+    // =====================================
+    const [status, setStatus] = useState("Offline");
+    const [wsInstance, setWsInstance] = useState(null);
+    const [sensor, setSensor] = useState({ f1: 0, f2: 0, ax: 0, ay: 0, az: 0 });
 
+    // =====================================
+    // STATE LOKAL & PARAMETER KNN
+    // =====================================
     const [recording, setRecording] = useState(false);
     const [gestureLabel, setGestureLabel] = useState("open_hand");
     const [profileName, setProfileName] = useState("");
-    const [status, setStatus] = useState("OFFLINE");
     const [tempDataset, setTempDataset] = useState([]);
+    const [trainedDataset, setTrainedDataset] = useState([]);
+    const [kValue, setKValue] = useState(5);
     const [message, setMessage] = useState("");
-
-    // State untuk UI Loading & Modal AI
+    const [recordCount, setRecordCount] = useState(0);
     const [isSaving, setIsSaving] = useState(false);
     const [showModal, setShowModal] = useState(false);
-    const [aiResults, setAiResults] = useState([]);
+    const [knnLogs, setKnnLogs] = useState([]);
+    const [chartData, setChartData] = useState([]);
+    const [activeTab, setActiveTab] = useState("tabel");
 
-    const [sensor, setSensor] = useState({
-        f1: 0,
-        f2: 0,
-        ax: 0,
-        ay: 0,
-        az: 0,
-    });
-
-    // BUFFER
     const datasetBuffer = useRef([]);
+    const recordingRef = useRef(false);
+    const profileRef = useRef("");
+    const gestureRef = useRef("open_hand");
 
-    // =================================================
-    // CONFIG
-    // =================================================
+    useEffect(() => {
+        recordingRef.current = recording;
+    }, [recording]);
+    useEffect(() => {
+        profileRef.current = profileName;
+    }, [profileName]);
+    useEffect(() => {
+        gestureRef.current = gestureLabel;
+    }, [gestureLabel]);
 
-    const RECORD_INTERVAL = 500;
-    const MAX_PREVIEW = 100;
-
-    // =================================================
-    // GESTURE LIST
-    // =================================================
-
+    const MIN_SAMPLE = 30;
     const gestures = [
         "open_hand",
         "close_hand",
@@ -46,11 +59,6 @@ export default function Gestur() {
         "tilt_left",
         "tilt_right",
     ];
-
-    // =================================================
-    // GESTURE INFO
-    // =================================================
-
     const gestureTutorial = {
         open_hand: {
             icon: "🖐",
@@ -79,171 +87,190 @@ export default function Gestur() {
         },
     };
 
-    // =================================================
-    // FETCH SENSOR
-    // =================================================
+    // =====================================
+    // FUNGSI KONEKSI WEBSOCKET LOKAL
+    // =====================================
+    const connectViaWiFi = () => {
+        if (status === "Online") return;
 
-    const fetchSensor = async () => {
-        try {
-            const res = await fetch("http://127.0.0.1:8000/api/live");
-            const result = await res.json();
+        // PASTIKAN IP INI SESUAI DENGAN IP ESP32 DI SERIAL MONITOR ANDA
+        const esp32IP = "172.20.10.3";
+        const wsUrl = `ws://${esp32IP}:81`;
 
-            if (result.status === "online" && result.data) {
-                setSensor({
-                    f1: result.data.f1 ?? 0,
-                    f2: result.data.f2 ?? 0,
-                    ax: result.data.ax ?? 0,
-                    ay: result.data.ay ?? 0,
-                    az: result.data.az ?? 0,
-                });
-                setStatus("ONLINE");
-            } else {
-                setStatus("OFFLINE");
-            }
-        } catch (err) {
-            console.log(err);
-            setStatus("OFFLINE");
-        }
-    };
+        const ws = new WebSocket(wsUrl);
 
-    // =================================================
-    // LIVE MONITORING
-    // =================================================
+        ws.onopen = () => {
+            setStatus("Online");
+            setWsInstance(ws);
+            setMessage("✅ Terhubung ke Smart Glove!");
+        };
 
-    useEffect(() => {
-        fetchSensor();
+        ws.onmessage = (event) => {
+            const cleanLine = event.data.trim();
+            if (cleanLine) {
+                const data = cleanLine.split(",");
+                if (data.length === 5) {
+                    const newSensor = {
+                        f1: parseInt(data[0]) || 0,
+                        f2: parseInt(data[1]) || 0,
+                        ax: parseInt(data[2]) || 0,
+                        ay: parseInt(data[3]) || 0,
+                        az: parseInt(data[4]) || 0,
+                    };
+                    setSensor(newSensor);
 
-        const interval = setInterval(() => {
-            fetchSensor();
-        }, 1000);
+                    // Update Grafik
+                    setChartData((prev) => {
+                        const updated = [
+                            ...prev,
+                            {
+                                time: new Date().toLocaleTimeString(),
+                                ...newSensor,
+                            },
+                        ];
+                        return updated.slice(-50);
+                    });
 
-        return () => clearInterval(interval);
-    }, []);
-
-    // =================================================
-    // START RECORD
-    // =================================================
-
-    const handleStartRecording = () => {
-        if (profileName.trim() === "") {
-            setMessage("❌ Masukkan nama profile terlebih dahulu");
-            return;
-        }
-
-        if (status !== "ONLINE") {
-            setMessage("❌ ESP32 offline");
-            return;
-        }
-
-        datasetBuffer.current = [];
-        setRecording(true);
-        setMessage(`🔴 Recording ${gestureLabel} dimulai`);
-    };
-
-    // =================================================
-    // STOP RECORD
-    // =================================================
-
-    const handleStopRecording = () => {
-        setRecording(false);
-
-        if (datasetBuffer.current.length === 0) {
-            setMessage("⚠ Tidak ada data yang direkam");
-            return;
-        }
-
-        setTempDataset((prev) => [...prev, ...datasetBuffer.current]);
-        setMessage(
-            `✅ ${datasetBuffer.current.length} sample berhasil direkam`,
-        );
-    };
-
-    // =================================================
-    // RECORDING LOOP
-    // =================================================
-
-    useEffect(() => {
-        let interval;
-
-        if (recording) {
-            interval = setInterval(async () => {
-                try {
-                    const res = await fetch("http://127.0.0.1:8000/api/live");
-                    const result = await res.json();
-
-                    if (result.status !== "online" || !result.data) {
-                        setStatus("OFFLINE");
-                        return;
+                    // Update Perekaman
+                    if (recordingRef.current) {
+                        datasetBuffer.current.push({
+                            id: Date.now() + Math.random(),
+                            profile: profileRef.current,
+                            label: gestureRef.current,
+                            ...newSensor,
+                            created_at: new Date().toLocaleTimeString(),
+                        });
+                        setRecordCount(datasetBuffer.current.length);
                     }
-
-                    const liveSensor = result.data;
-
-                    setSensor({
-                        f1: liveSensor.f1 ?? 0,
-                        f2: liveSensor.f2 ?? 0,
-                        ax: liveSensor.ax ?? 0,
-                        ay: liveSensor.ay ?? 0,
-                        az: liveSensor.az ?? 0,
-                    });
-
-                    // RECORD RAW DATA
-                    datasetBuffer.current.push({
-                        id: Date.now() + Math.random(),
-                        profile: profileName,
-                        label: gestureLabel,
-                        f1: liveSensor.f1 ?? 0,
-                        f2: liveSensor.f2 ?? 0,
-                        ax: liveSensor.ax ?? 0,
-                        ay: liveSensor.ay ?? 0,
-                        az: liveSensor.az ?? 0,
-                        created_at: new Date().toLocaleTimeString(),
-                    });
-                } catch (err) {
-                    console.log(err);
                 }
-            }, RECORD_INTERVAL);
+            }
+        };
+
+        ws.onclose = () => {
+            setStatus("Offline");
+            setWsInstance(null);
+            setMessage("❌ Koneksi terputus.");
+        };
+
+        ws.onerror = () => {
+            setStatus("Offline");
+            setMessage("❌ Gagal terhubung. Pastikan IP ESP32 benar.");
+        };
+    };
+
+    const stopConnection = () => {
+        if (wsInstance) wsInstance.close();
+        setStatus("Offline");
+    };
+
+    // =====================================
+    // CORE MACHINE LEARNING: ALGORITMA KNN
+    // =====================================
+    const classifyLiveGestureKNN = () => {
+        if (status === "Offline") return "⚠️ Perangkat Offline";
+        if (trainedDataset.length === 0) return "💡 Model Belum Dilatih";
+
+        const distances = trainedDataset.map((sample) => {
+            const dFlex1 = (sensor.f1 - sample.f1) / 4095;
+            const dFlex2 = (sensor.f2 - sample.f2) / 4095;
+            const dAx = (sensor.ax - sample.ax) / 32768;
+            const dAy = (sensor.ay - sample.ay) / 32768;
+            const dAz = (sensor.az - sample.az) / 32768;
+
+            const euclideanDistance = Math.sqrt(
+                Math.pow(dFlex1, 2) +
+                    Math.pow(dFlex2, 2) +
+                    Math.pow(dAx, 2) +
+                    Math.pow(dAy, 2) +
+                    Math.pow(dAz, 2),
+            );
+
+            return { label: sample.label, distance: euclideanDistance };
+        });
+
+        distances.sort((a, b) => a.distance - b.distance);
+        const nearestNeighbors = distances.slice(0, kValue);
+
+        const votes = {};
+        nearestNeighbors.forEach((neighbor) => {
+            votes[neighbor.label] = (votes[neighbor.label] || 0) + 1;
+        });
+
+        let bestGesture = "-";
+        let maxVotes = -1;
+        Object.entries(votes).forEach(([label, count]) => {
+            if (count > maxVotes) {
+                maxVotes = count;
+                bestGesture = label;
+            }
+        });
+
+        const gestureInfo = gestureTutorial[bestGesture];
+        return gestureInfo
+            ? `${gestureInfo.icon} ${gestureInfo.title}`
+            : bestGesture;
+    };
+
+    // =====================================
+    // EVENT HANDLERS
+    // =====================================
+    const handleToggleRecording = () => {
+        if (!recording) {
+            if (!profileName.trim())
+                return setMessage("❌ Masukkan nama profile!");
+            if (status !== "Online")
+                return setMessage("❌ Hubungkan device terlebih dahulu!");
+
+            datasetBuffer.current = [];
+            setRecordCount(0);
+            setRecording(true);
+            setMessage(`🔴 Merekam gesture: ${gestureLabel}...`);
+        } else {
+            setRecording(false);
+            if (datasetBuffer.current.length === 0)
+                return setMessage("⚠ Tidak ada data terekam");
+            setTempDataset((prev) => [...prev, ...datasetBuffer.current]);
+            setMessage(`✅ ${datasetBuffer.current.length} sampel ditambahkan`);
+            setRecordCount(0);
         }
+    };
 
-        return () => clearInterval(interval);
-    }, [recording, gestureLabel, profileName]);
+    const handleClearDataset = () => {
+        setTempDataset([]);
+        setTrainedDataset([]);
+        datasetBuffer.current = [];
+        setRecordCount(0);
+        setMessage("🗑 Dataset dan Model KNN dikosongkan");
+    };
 
-    // =================================================
-    // SAVE DATASET (WITH LOADING & MODAL)
-    // =================================================
+    const handleTrainAndSaveKNN = async () => {
+        const insufficient = gestures.filter((g) => {
+            const count = tempDataset.filter((i) => i.label === g).length;
+            return count > 0 && count < MIN_SAMPLE;
+        });
 
-    const saveDataset = async () => {
-        if (tempDataset.length === 0) {
-            alert("Dataset kosong");
-            return;
-        }
+        if (insufficient.length > 0)
+            return setMessage(`❌ Sampel kurang: ${insufficient.join(", ")}`);
+        if (tempDataset.length === 0) return setMessage("❌ Dataset kosong");
 
-        // Tampilkan modal dan aktifkan status loading
         setIsSaving(true);
         setShowModal(true);
-        setAiResults([]);
+        setTrainedDataset([...tempDataset]);
 
         try {
             const grouped = {};
-
-            // GROUP BERDASARKAN GESTURE
-            tempDataset.forEach((item) => {
-                if (!grouped[item.label]) {
-                    grouped[item.label] = [];
-                }
-                grouped[item.label].push(item);
+            tempDataset.forEach((i) => {
+                if (!grouped[i.label]) grouped[i.label] = [];
+                grouped[i.label].push(i);
             });
 
-            const currentResults = [];
-
-            // KIRIM SATU PERSATU DAN SIMPAN RESPONS AI
+            const currentLogs = [];
             for (const gesture in grouped) {
-                const res = await fetch(
-                    "http://127.0.0.1:8000/api/gesture/save",
+                const saveRes = await fetch(
+                    "http://192.168.0.110:8000/api/gestures",
                     {
                         method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                        },
+                        headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
                             profile_name: profileName,
                             gesture_name: gesture,
@@ -251,505 +278,436 @@ export default function Gestur() {
                         }),
                     },
                 );
-
-                const result = await res.json();
-
-                // Masukkan hasil ke array sementara
-                currentResults.push({
-                    gesture: gesture,
-                    success: result.success,
-                    analysis: result.analysis,
-                    llm_data: result.llm_data, // Rentang data min max dari PHP
-                    message: result.message,
+                const saveResult = await saveRes.json();
+                currentLogs.push({
+                    gesture,
+                    success: saveResult.success,
+                    total_samples: grouped[gesture].length,
+                    message: saveResult.success
+                        ? "Arsip DB sukses"
+                        : "Gagal arsip DB",
                 });
             }
-
-            // Setelah semua selesai, matikan loading dan update state hasil
-            setAiResults(currentResults);
+            setKnnLogs(currentLogs);
             setIsSaving(false);
-            setTempDataset([]); // Clear dataset otomatis jika berhasil
-            setMessage("✅ Semua gesture berhasil dianalisis AI dan disimpan");
-        } catch (err) {
-            console.log(err);
+            setMessage("✅ Model KNN lokal aktif!");
+        } catch {
             setIsSaving(false);
-            setAiResults([
-                {
-                    gesture: "Error System",
-                    success: false,
-                    message:
-                        "Gagal mengirim data ke server. Pastikan Backend dan Ollama berjalan.",
-                },
-            ]);
+            setMessage("⚠ Model KNN aktif, gagal arsip ke Laravel.");
         }
     };
 
-    // =================================================
-    // CLEAR DATASET
-    // =================================================
-
-    const clearDataset = () => {
-        const confirmDelete = confirm("Hapus dataset sementara?");
-        if (!confirmDelete) return;
-
-        setTempDataset([]);
-        datasetBuffer.current = [];
-        setMessage("🗑 Dataset sementara dihapus");
+    const exportToExcel = () => {
+        if (tempDataset.length === 0) return alert("Dataset kosong");
+        const worksheet = XLSX.utils.json_to_sheet(
+            tempDataset.map((i, idx) => ({
+                No: idx + 1,
+                Profile: i.profile,
+                Gesture: i.label,
+                F1: i.f1,
+                F2: i.f2,
+                AX: i.ax,
+                AY: i.ay,
+                AZ: i.az,
+                Waktu: i.created_at,
+            })),
+        );
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, worksheet, "Dataset KNN");
+        XLSX.writeFile(wb, `Dataset_KNN_${profileName}.xlsx`);
     };
 
-    // =================================================
-    // STATS
-    // =================================================
+    const gestureStats = useMemo(
+        () =>
+            gestures.reduce(
+                (acc, g) => ({
+                    ...acc,
+                    [g]: tempDataset.filter((i) => i.label === g).length,
+                }),
+                {},
+            ),
+        [tempDataset],
+    );
 
-    const gestureStats = useMemo(() => {
-        return gestures.reduce((acc, gesture) => {
-            acc[gesture] = tempDataset.filter(
-                (item) => item.label === gesture,
-            ).length;
-            return acc;
-        }, {});
-    }, [tempDataset]);
-
-    const totalSample = tempDataset.length + datasetBuffer.current.length;
-
-    // =================================================
-    // UI
-    // =================================================
+    const tutorial = gestureTutorial[gestureLabel];
 
     return (
-        <div className="p-8 bg-slate-100 min-h-screen relative">
-            {/* ================= MODAL POPUP AI ================= */}
-            {showModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900 bg-opacity-60 backdrop-blur-sm p-4">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh] animate-fade-in-up">
-                        {/* LOADING STATE */}
-                        {isSaving ? (
-                            <div className="p-16 flex flex-col items-center justify-center text-center">
-                                <div className="relative w-24 h-24 mb-6">
-                                    <div className="absolute inset-0 rounded-full border-4 border-slate-200"></div>
-                                    <div className="absolute inset-0 rounded-full border-4 border-cyan-500 border-t-transparent animate-spin"></div>
-                                    <div className="absolute inset-0 flex items-center justify-center text-3xl">
-                                        🤖
-                                    </div>
-                                </div>
-                                <h2 className="text-3xl font-bold text-slate-800 mb-2">
-                                    AI sedang menganalisis...
-                                </h2>
-                                <p className="text-slate-500 text-lg animate-pulse">
-                                    Memproses gesture Anda dengan Ollama
-                                    (Gemma:2b). Mohon tunggu sebentar.
-                                </p>
-                            </div>
-                        ) : (
-                            /* RESULT STATE */
-                            <>
-                                <div className="p-6 border-b flex justify-between items-center bg-gradient-to-r from-cyan-600 to-blue-600 text-white">
-                                    <div>
-                                        <h2 className="text-2xl font-bold">
-                                            ✨ Hasil Analisis AI
-                                        </h2>
-                                        <p className="text-cyan-100 text-sm">
-                                            Profile: {profileName}
-                                        </p>
-                                    </div>
-                                    <button
-                                        onClick={() => setShowModal(false)}
-                                        className="text-white hover:text-red-300 transition-colors text-2xl font-bold bg-white/20 w-10 h-10 rounded-full flex items-center justify-center"
-                                    >
-                                        ×
-                                    </button>
-                                </div>
-
-                                <div className="p-6 overflow-y-auto flex-1 space-y-6 bg-slate-50">
-                                    {aiResults.map((res, index) => (
-                                        <div
-                                            key={index}
-                                            className="bg-white border rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow"
-                                        >
-                                            <div className="flex items-center gap-3 mb-4">
-                                                <div className="text-3xl">
-                                                    {gestureTutorial[
-                                                        res.gesture
-                                                    ]?.icon || "📌"}
-                                                </div>
-                                                <h3 className="text-2xl font-bold capitalize text-slate-800">
-                                                    {res.gesture.replace(
-                                                        "_",
-                                                        " ",
-                                                    )}
-                                                </h3>
-                                                {res.success ? (
-                                                    <span className="ml-auto bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-bold border border-green-200">
-                                                        Berhasil
-                                                    </span>
-                                                ) : (
-                                                    <span className="ml-auto bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-bold border border-red-200">
-                                                        Gagal
-                                                    </span>
-                                                )}
-                                            </div>
-
-                                            {res.success ? (
-                                                <div className="space-y-5">
-                                                    {/* Deskripsi AI */}
-                                                    <div className="bg-blue-50/50 p-5 rounded-xl border border-blue-100">
-                                                        <h4 className="text-xs font-bold text-blue-800 uppercase tracking-wider mb-2 flex items-center gap-2">
-                                                            <span>💡</span>{" "}
-                                                            Insight
-                                                            Karakteristik
-                                                        </h4>
-                                                        <p className="text-slate-700 leading-relaxed italic">
-                                                            "{res.analysis}"
-                                                        </p>
-                                                    </div>
-
-                                                    {/* Rentang Min Max dari LLM */}
-                                                    {res.llm_data && (
-                                                        <div>
-                                                            <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
-                                                                Rentang Sensor
-                                                                Rekomendasi (Min
-                                                                - Max)
-                                                            </h4>
-                                                            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                                                                <div className="bg-slate-100 p-3 rounded-xl text-center">
-                                                                    <span className="block text-xs font-bold text-slate-400 mb-1">
-                                                                        F1
-                                                                    </span>
-                                                                    <span className="font-semibold text-slate-700">
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .min_f1
-                                                                        }{" "}
-                                                                        <span className="text-slate-400 font-normal">
-                                                                            ~
-                                                                        </span>{" "}
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .max_f1
-                                                                        }
-                                                                    </span>
-                                                                </div>
-                                                                <div className="bg-slate-100 p-3 rounded-xl text-center">
-                                                                    <span className="block text-xs font-bold text-slate-400 mb-1">
-                                                                        F2
-                                                                    </span>
-                                                                    <span className="font-semibold text-slate-700">
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .min_f2
-                                                                        }{" "}
-                                                                        <span className="text-slate-400 font-normal">
-                                                                            ~
-                                                                        </span>{" "}
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .max_f2
-                                                                        }
-                                                                    </span>
-                                                                </div>
-                                                                <div className="bg-slate-100 p-3 rounded-xl text-center">
-                                                                    <span className="block text-xs font-bold text-slate-400 mb-1">
-                                                                        AX
-                                                                    </span>
-                                                                    <span className="font-semibold text-slate-700">
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .min_ax
-                                                                        }{" "}
-                                                                        <span className="text-slate-400 font-normal">
-                                                                            ~
-                                                                        </span>{" "}
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .max_ax
-                                                                        }
-                                                                    </span>
-                                                                </div>
-                                                                <div className="bg-slate-100 p-3 rounded-xl text-center">
-                                                                    <span className="block text-xs font-bold text-slate-400 mb-1">
-                                                                        AY
-                                                                    </span>
-                                                                    <span className="font-semibold text-slate-700">
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .min_ay
-                                                                        }{" "}
-                                                                        <span className="text-slate-400 font-normal">
-                                                                            ~
-                                                                        </span>{" "}
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .max_ay
-                                                                        }
-                                                                    </span>
-                                                                </div>
-                                                                <div className="bg-slate-100 p-3 rounded-xl text-center">
-                                                                    <span className="block text-xs font-bold text-slate-400 mb-1">
-                                                                        AZ
-                                                                    </span>
-                                                                    <span className="font-semibold text-slate-700">
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .min_az
-                                                                        }{" "}
-                                                                        <span className="text-slate-400 font-normal">
-                                                                            ~
-                                                                        </span>{" "}
-                                                                        {
-                                                                            res
-                                                                                .llm_data
-                                                                                .max_az
-                                                                        }
-                                                                    </span>
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            ) : (
-                                                <p className="text-red-500 bg-red-50 p-4 rounded-xl border border-red-100 mt-2">
-                                                    {res.message}
-                                                </p>
-                                            )}
-                                        </div>
-                                    ))}
-                                </div>
-
-                                <div className="p-5 border-t bg-white flex justify-end">
-                                    <button
-                                        onClick={() => setShowModal(false)}
-                                        className="bg-slate-800 text-white px-8 py-3 rounded-xl hover:bg-slate-900 transition-colors font-semibold"
-                                    >
-                                        Tutup & Lanjutkan
-                                    </button>
-                                </div>
-                            </>
-                        )}
-                    </div>
-                </div>
-            )}
-            {/* ================================================== */}
-
-            {/* HEADER */}
-            <div className="mb-8">
-                <h1 className="text-4xl font-bold text-cyan-700">
-                    Smart Glove Dataset Recorder
-                </h1>
-                <p className="text-gray-500 mt-2">
-                    Dataset gesture realtime berbasis ESP32
-                </p>
-            </div>
-
-            {/* TOP */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* TUTORIAL */}
-                <div className="bg-white rounded-2xl shadow-lg p-6">
-                    <div className="text-center">
-                        <div className="text-7xl mb-4">
-                            {gestureTutorial[gestureLabel].icon}
-                        </div>
-                        <h1 className="text-2xl font-bold">
-                            {gestureTutorial[gestureLabel].title}
-                        </h1>
-                        <p className="text-gray-500 mt-3">
-                            {gestureTutorial[gestureLabel].desc}
-                        </p>
-                    </div>
-                </div>
-
-                {/* SENSOR */}
-                <div className="bg-white rounded-2xl shadow-lg p-6">
-                    <h2 className="text-xl font-bold mb-5">Live Sensor</h2>
-                    <div className="space-y-4">
-                        <div className="bg-slate-100 rounded-xl p-4">
-                            F1 : {sensor.f1}
-                        </div>
-                        <div className="bg-slate-100 rounded-xl p-4">
-                            F2 : {sensor.f2}
-                        </div>
-                        <div className="bg-slate-100 rounded-xl p-4">
-                            AX : {sensor.ax}
-                        </div>
-                        <div className="bg-slate-100 rounded-xl p-4">
-                            AY : {sensor.ay}
-                        </div>
-                        <div className="bg-slate-100 rounded-xl p-4">
-                            AZ : {sensor.az}
-                        </div>
-                    </div>
-                </div>
-
-                {/* CONTROL */}
-                <div className="bg-white rounded-2xl shadow-lg p-6">
-                    <h2 className="text-xl font-bold mb-5">Recording Panel</h2>
-
-                    {/* PROFILE */}
-                    <input
-                        type="text"
-                        placeholder="Nama profile"
-                        value={profileName}
-                        onChange={(e) => setProfileName(e.target.value)}
-                        className="w-full border rounded-xl px-4 py-3 mb-4"
-                    />
-
-                    {/* GESTURE */}
-                    <select
-                        value={gestureLabel}
-                        onChange={(e) => setGestureLabel(e.target.value)}
-                        className="w-full border rounded-xl px-4 py-3 mb-4"
-                    >
-                        {gestures.map((gesture) => (
-                            <option key={gesture} value={gesture}>
-                                {gesture.replace("_", " ")}
-                            </option>
-                        ))}
-                    </select>
-
-                    {/* STATUS */}
-                    <div className="mb-4">
-                        STATUS :
+        <div className="p-6 bg-slate-100 min-h-screen">
+            {/* KONTROL KONEKSI */}
+            <div className="bg-white rounded-xl shadow-sm p-4 mb-6 flex justify-between items-center border-l-4 border-cyan-500">
+                <div>
+                    <h2 className="font-bold text-slate-700">
+                        Koneksi ESP32 (Independen)
+                    </h2>
+                    <p className="text-xs text-slate-400">
+                        Status:{" "}
                         <span
-                            className={`ml-2 font-bold ${
-                                status === "ONLINE"
-                                    ? "text-green-600"
-                                    : "text-red-500"
-                            }`}
+                            className={
+                                status === "Online"
+                                    ? "text-green-500 font-bold"
+                                    : "text-red-500 font-bold"
+                            }
                         >
                             {status}
                         </span>
-                    </div>
-
-                    {/* RECORD STATUS */}
-                    <div className="mb-5 bg-slate-100 rounded-xl p-4">
-                        <p className="font-bold">
-                            {recording ? "🔴 RECORDING" : "⚪ STANDBY"}
-                        </p>
-                        <p className="text-sm text-gray-600 mt-2">
-                            Current Gesture : {gestureLabel}
-                        </p>
-                        <p className="text-sm text-gray-600">
-                            Total Sample : {totalSample}
-                        </p>
-                    </div>
-
-                    {/* BUTTON */}
-                    <div className="grid grid-cols-2 gap-3">
+                    </p>
+                </div>
+                <div>
+                    {status === "Offline" ? (
                         <button
-                            onClick={handleStartRecording}
-                            disabled={recording}
-                            className="bg-cyan-600 text-white rounded-xl py-3 disabled:opacity-50"
+                            onClick={connectViaWiFi}
+                            className="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded-lg text-sm font-semibold"
                         >
-                            ▶ Record
+                            📶 Hubungkan
                         </button>
+                    ) : (
                         <button
-                            onClick={handleStopRecording}
-                            disabled={!recording}
-                            className="bg-red-500 text-white rounded-xl py-3 disabled:opacity-50"
+                            onClick={stopConnection}
+                            className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-semibold"
                         >
-                            ■ Stop
+                            ■ Putuskan
                         </button>
-                        <button
-                            onClick={saveDataset}
-                            disabled={isSaving || tempDataset.length === 0}
-                            className="bg-green-600 text-white rounded-xl py-3 disabled:opacity-50 flex items-center justify-center gap-2"
-                        >
-                            {isSaving ? (
-                                <>
-                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                                    Saving...
-                                </>
-                            ) : (
-                                "💾 Save AI"
-                            )}
-                        </button>
-                        <button
-                            onClick={clearDataset}
-                            className="bg-gray-500 text-white rounded-xl py-3"
-                        >
-                            🗑 Clear
-                        </button>
-                    </div>
-
-                    {/* MESSAGE */}
-                    {message && (
-                        <div className="mt-5 bg-slate-100 rounded-xl p-4 text-sm font-medium">
-                            {message}
-                        </div>
                     )}
                 </div>
             </div>
 
-            {/* STATS */}
-            <div className="mt-8 grid grid-cols-2 md:grid-cols-5 gap-4">
-                {gestures.map((gesture) => (
-                    <div
-                        key={gesture}
-                        className="bg-white rounded-xl p-5 shadow"
-                    >
-                        <p className="text-gray-500">
-                            {gesture.replace("_", " ")}
-                        </p>
-                        <h1 className="text-4xl font-bold text-cyan-700 mt-2">
-                            {gestureStats[gesture] || 0}
-                        </h1>
-                    </div>
-                ))}
-            </div>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+                <div className="bg-white rounded-xl p-5 shadow-sm flex flex-col items-center justify-center text-center">
+                    <div className="text-6xl mb-3">{tutorial.icon}</div>
+                    <h2 className="text-lg font-semibold text-slate-800">
+                        {tutorial.title}
+                    </h2>
+                    <p className="text-slate-500 text-sm mt-1">
+                        {tutorial.desc}
+                    </p>
+                </div>
 
-            {/* TABLE */}
-            <div className="mt-8 bg-white rounded-2xl shadow-lg p-6">
-                <h2 className="text-2xl font-bold mb-5">Dataset Sementara</h2>
-                <div className="overflow-auto max-h-[500px]">
-                    <table className="w-full text-sm">
-                        <thead>
-                            <tr className="border-b bg-slate-50 sticky top-0">
-                                <th className="p-3 text-left">No</th>
-                                <th className="p-3 text-left">Profile</th>
-                                <th className="p-3 text-left">Gesture</th>
-                                <th className="p-3 text-left">F1</th>
-                                <th className="p-3 text-left">F2</th>
-                                <th className="p-3 text-left">AX</th>
-                                <th className="p-3 text-left">AY</th>
-                                <th className="p-3 text-left">AZ</th>
-                                <th className="p-3 text-left">Time</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {tempDataset
-                                .slice(-MAX_PREVIEW)
-                                .map((item, index) => (
-                                    <tr
-                                        key={item.id}
-                                        className="border-b hover:bg-slate-50"
-                                    >
-                                        <td className="p-3">{index + 1}</td>
-                                        <td className="p-3">{item.profile}</td>
-                                        <td className="p-3 font-semibold text-cyan-700">
-                                            {item.label}
-                                        </td>
-                                        <td className="p-3">{item.f1}</td>
-                                        <td className="p-3">{item.f2}</td>
-                                        <td className="p-3">{item.ax}</td>
-                                        <td className="p-3">{item.ay}</td>
-                                        <td className="p-3">{item.az}</td>
-                                        <td className="p-3">
-                                            {item.created_at}
-                                        </td>
-                                    </tr>
-                                ))}
-                        </tbody>
-                    </table>
+                <div className="bg-white rounded-xl p-5 shadow-sm">
+                    <h2 className="font-semibold text-slate-700 mb-3">
+                        Live Sensor
+                    </h2>
+                    {[
+                        {
+                            label: "F1 (Ibu Jari)",
+                            value: sensor.f1,
+                            color: "bg-blue-500",
+                        },
+                        {
+                            label: "F2 (Telunjuk)",
+                            value: sensor.f2,
+                            color: "bg-indigo-500",
+                        },
+                        {
+                            label: "AX",
+                            value: sensor.ax,
+                            color: "bg-green-500",
+                        },
+                        {
+                            label: "AY",
+                            value: sensor.ay,
+                            color: "bg-yellow-500",
+                        },
+                        { label: "AZ", value: sensor.az, color: "bg-red-500" },
+                    ].map((s) => (
+                        <div
+                            key={s.label}
+                            className="flex justify-between items-center bg-slate-50 rounded-lg px-3 py-2 mb-2"
+                        >
+                            <div className="flex items-center gap-2">
+                                <div
+                                    className={`w-2 h-2 rounded-full ${s.color}`}
+                                />
+                                <span className="text-sm text-slate-500">
+                                    {s.label}
+                                </span>
+                            </div>
+                            <span className="font-mono font-semibold text-slate-800">
+                                {s.value}
+                            </span>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="bg-white rounded-xl p-5 shadow-sm">
+                    <h2 className="font-semibold text-slate-700 mb-2">
+                        Kendali ML
+                    </h2>
+
+                    <div className="flex items-center gap-2 mb-3">
+                        <label className="text-xs text-slate-500 font-medium">
+                            Nilai K (KNN):
+                        </label>
+                        <input
+                            type="number"
+                            value={kValue}
+                            onChange={(e) =>
+                                setKValue(
+                                    Math.max(1, parseInt(e.target.value) || 1),
+                                )
+                            }
+                            disabled={recording}
+                            className="w-16 border rounded px-2 py-0.5 text-sm text-center"
+                        />
+                    </div>
+
+                    <input
+                        type="text"
+                        placeholder="Nama Profile"
+                        value={profileName}
+                        onChange={(e) => setProfileName(e.target.value)}
+                        disabled={recording}
+                        className="w-full border rounded-lg px-3 py-2 text-sm mb-3"
+                    />
+                    <select
+                        value={gestureLabel}
+                        onChange={(e) => setGestureLabel(e.target.value)}
+                        disabled={recording}
+                        className="w-full border rounded-lg px-3 py-2 text-sm mb-3"
+                    >
+                        {gestures.map((g) => (
+                            <option key={g} value={g}>
+                                {g}
+                            </option>
+                        ))}
+                    </select>
+
+                    <button
+                        onClick={handleToggleRecording}
+                        className={`w-full py-2 rounded-lg font-semibold text-white text-sm mb-2 ${recording ? "bg-red-500" : "bg-blue-600"}`}
+                    >
+                        {recording ? "■ Stop Perekaman" : "▶ Ambil Sampel"}
+                    </button>
+
+                    <div className="grid grid-cols-2 gap-2 mb-2">
+                        <button
+                            onClick={handleTrainAndSaveKNN}
+                            disabled={tempDataset.length === 0 || recording}
+                            className="bg-green-600 disabled:opacity-40 text-white rounded-lg py-2 text-xs font-semibold"
+                        >
+                            ⚡ Train KNN
+                        </button>
+                        <button
+                            onClick={exportToExcel}
+                            disabled={tempDataset.length === 0 || recording}
+                            className="bg-orange-500 disabled:opacity-40 text-white rounded-lg py-2 text-xs font-semibold"
+                        >
+                            📊 Export
+                        </button>
+                    </div>
+                    <button
+                        onClick={handleClearDataset}
+                        disabled={tempDataset.length === 0 || recording}
+                        className="w-full bg-slate-200 text-slate-700 rounded-lg py-2 text-xs"
+                    >
+                        🗑 Reset
+                    </button>
                 </div>
             </div>
+
+            {/* BAR PROGRES VALIDASI SAMPEL */}
+            <div className="grid grid-cols-5 gap-3 mb-4">
+                {gestures.map((g) => {
+                    const count = gestureStats[g];
+                    const isEnough = count >= MIN_SAMPLE;
+                    return (
+                        <div
+                            key={g}
+                            className={`bg-white rounded-xl p-3 shadow-sm text-center border-2 ${isEnough ? "border-green-400" : count > 0 ? "border-yellow-400" : "border-transparent"}`}
+                        >
+                            <div className="text-xl mb-1">
+                                {gestureTutorial[g].icon}
+                            </div>
+                            <div className="text-xs text-slate-500 capitalize">
+                                {g.replace("_", " ")}
+                            </div>
+                            <div
+                                className={`font-bold mt-1 ${isEnough ? "text-green-600" : "text-slate-800"}`}
+                            >
+                                {count}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+
+            {message && (
+                <div className="mb-4 bg-white rounded-xl p-3 text-sm text-slate-700 shadow-sm border">
+                    {message}
+                </div>
+            )}
+
+            <div className="mb-4 bg-white rounded-2xl shadow-lg p-6 border-t-4 border-cyan-600 text-center">
+                <h2 className="text-xl font-bold text-slate-700 mb-1">
+                    Live KNN Prediction
+                </h2>
+                <div className="mt-4 p-6 bg-slate-50 rounded-xl border border-dashed inline-block min-w-[320px]">
+                    <div className="text-4xl font-bold text-cyan-700">
+                        {classifyLiveGestureKNN()}
+                    </div>
+                </div>
+            </div>
+
+            {(tempDataset.length > 0 || chartData.length > 0) && (
+                <div className="bg-white rounded-xl shadow-sm overflow-hidden mb-8">
+                    <div className="flex border-b border-slate-100">
+                        {["grafik", "tabel"].map((tab) => (
+                            <button
+                                key={tab}
+                                onClick={() => setActiveTab(tab)}
+                                className={`px-6 py-3 text-sm font-semibold capitalize ${activeTab === tab ? "border-b-2 border-blue-600 text-blue-600" : "text-slate-400"}`}
+                            >
+                                {tab === "grafik" ? "📈 Grafik" : "📋 Tabel"}
+                            </button>
+                        ))}
+                    </div>
+
+                    {activeTab === "grafik" && (
+                        <div className="p-5">
+                            <div className="mb-6">
+                                <h3 className="text-sm font-semibold text-slate-600 mb-2">
+                                    Sensor Flex
+                                </h3>
+                                <ResponsiveContainer width="100%" height={200}>
+                                    <LineChart data={chartData}>
+                                        <XAxis
+                                            dataKey="time"
+                                            tick={{ fontSize: 10 }}
+                                        />
+                                        <YAxis tick={{ fontSize: 10 }} />
+                                        <Tooltip />
+                                        <Line
+                                            type="monotone"
+                                            dataKey="f1"
+                                            stroke="#3b82f6"
+                                            dot={false}
+                                        />
+                                        <Line
+                                            type="monotone"
+                                            dataKey="f2"
+                                            stroke="#6366f1"
+                                            dot={false}
+                                        />
+                                    </LineChart>
+                                </ResponsiveContainer>
+                            </div>
+                            <div>
+                                <h3 className="text-sm font-semibold text-slate-600 mb-2">
+                                    MPU6050
+                                </h3>
+                                <ResponsiveContainer width="100%" height={200}>
+                                    <LineChart data={chartData}>
+                                        <XAxis
+                                            dataKey="time"
+                                            tick={{ fontSize: 10 }}
+                                        />
+                                        <YAxis tick={{ fontSize: 10 }} />
+                                        <Tooltip />
+                                        <Line
+                                            type="monotone"
+                                            dataKey="ax"
+                                            stroke="#22c55e"
+                                            dot={false}
+                                        />
+                                        <Line
+                                            type="monotone"
+                                            dataKey="ay"
+                                            stroke="#eab308"
+                                            dot={false}
+                                        />
+                                        <Line
+                                            type="monotone"
+                                            dataKey="az"
+                                            stroke="#ef4444"
+                                            dot={false}
+                                        />
+                                    </LineChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === "tabel" && (
+                        <div className="overflow-x-auto p-4">
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-slate-50 text-slate-500">
+                                    <tr>
+                                        <th>No</th>
+                                        <th>Target</th>
+                                        <th>F1</th>
+                                        <th>F2</th>
+                                        <th>AX</th>
+                                        <th>AY</th>
+                                        <th>AZ</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {tempDataset.slice(-100).map((row, idx) => (
+                                        <tr
+                                            key={row.id}
+                                            className="border-t hover:bg-slate-50"
+                                        >
+                                            <td className="py-2">{idx + 1}</td>
+                                            <td className="py-2">
+                                                <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded">
+                                                    {row.label}
+                                                </span>
+                                            </td>
+                                            <td className="py-2 font-mono">
+                                                {row.f1}
+                                            </td>
+                                            <td className="py-2 font-mono">
+                                                {row.f2}
+                                            </td>
+                                            <td className="py-2 font-mono">
+                                                {row.ax}
+                                            </td>
+                                            <td className="py-2 font-mono">
+                                                {row.ay}
+                                            </td>
+                                            <td className="py-2 font-mono">
+                                                {row.az}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* MODAL LAPORAN */}
+            {showModal && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                    <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl">
+                        <h2 className="text-lg font-bold mb-4">
+                            {isSaving ? "⏳ Sinkronisasi..." : "✅ Laporan KNN"}
+                        </h2>
+                        <div className="space-y-3">
+                            {!isSaving &&
+                                knnLogs.map((log, i) => (
+                                    <div
+                                        key={i}
+                                        className="p-3 bg-slate-50 border rounded-lg text-sm flex justify-between"
+                                    >
+                                        <span className="font-semibold capitalize">
+                                            {log.gesture.replace("_", " ")}
+                                        </span>
+                                        <span>{log.total_samples} Smp</span>
+                                    </div>
+                                ))}
+                        </div>
+                        {!isSaving && (
+                            <button
+                                onClick={() => setShowModal(false)}
+                                className="mt-4 w-full bg-slate-800 text-white rounded-lg py-2"
+                            >
+                                Tutup
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

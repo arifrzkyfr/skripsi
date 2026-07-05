@@ -1,261 +1,160 @@
 import { useState } from "react";
-import toast, { Toaster } from "react-hot-toast";
 
 export default function DeviceSetup() {
-    const [device, setDevice] = useState(null);
+    const [sensor, setSensor] = useState(null);
+    const [status, setStatus] = useState("Offline");
 
-    const [server, setServer] = useState("http://192.168.1.5/api/sensor");
-
-    const [ssid, setSsid] = useState("");
-
-    const [password, setPassword] = useState("");
-
-    const [connected, setConnected] = useState(false);
-
-    const [characteristic, setCharacteristic] = useState(null);
-
-    // UUID BLE
-    const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
-
-    const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-
-    // CONNECT BLE
-    const connectBluetooth = async () => {
-        try {
-            const bleDevice = await navigator.bluetooth.requestDevice({
-                filters: [{ name: "smartglove" }],
-                optionalServices: [SERVICE_UUID],
-            });
-
-            setDevice(bleDevice);
-
-            toast.loading("Menghubungkan ESP32...");
-
-            const gattServer = await bleDevice.gatt.connect();
-
-            const service = await gattServer.getPrimaryService(SERVICE_UUID);
-
-            const charac = await service.getCharacteristic(CHARACTERISTIC_UUID);
-
-            setCharacteristic(charac);
-
-            // ========================================
-            // READ CONFIG FROM ESP32
-            // ========================================
-
-            const value = await charac.readValue();
-
-            const decoder = new TextDecoder();
-
-            const text = decoder.decode(value);
-
-            console.log("CONFIG:", text);
-
-            const parts = text.split("|");
-
-            if (parts.length === 3) {
-                setSsid(parts[0]);
-
-                setPassword(parts[1]);
-
-                setServer(parts[2]);
-            }
-
-            setConnected(true);
-
-            toast.dismiss();
-
-            toast.success("ESP32 berhasil terhubung");
-        } catch (err) {
-            console.log(err);
-
-            toast.dismiss();
-
-            toast.error("Gagal connect Bluetooth");
+    // Fungsi utama untuk menangkap aliran data dari USB
+    const connectGlove = async () => {
+        // Cek dukungan browser
+        if (!("serial" in navigator)) {
+            alert(
+                "Browser Anda tidak mendukung Web Serial API. Gunakan Google Chrome atau Microsoft Edge.",
+            );
+            return;
         }
-    };
 
-    // SAVE CONFIG
-    const saveConfig = async () => {
         try {
-            if (!characteristic) {
-                toast.error("Bluetooth belum connect");
+            // 1. Meminta izin memilih COM Port
+            const port = await navigator.serial.requestPort();
 
-                return;
+            // 2. Membuka koneksi (Baud rate wajib sama dengan Serial.begin di ESP32/Arduino)
+            await port.open({ baudRate: 115200 });
+            setStatus("Connected");
+
+            // 3. Menyiapkan penerjemah teks (mengubah sinyal biner jadi string)
+            const textDecoder = new TextDecoderStream();
+            const readableStreamClosed = port.readable.pipeTo(
+                textDecoder.writable,
+            );
+            const reader = textDecoder.readable.getReader();
+
+            let buffer = "";
+
+            // 4. Looping tanpa henti untuk membaca data secara real-time
+            while (true) {
+                const { value, done } = await reader.read();
+
+                if (done) {
+                    // Berhenti jika koneksi diputus
+                    reader.releaseLock();
+                    break;
+                }
+
+                if (value) {
+                    buffer += value;
+                    // Arduino menggunakan println yang menghasilkan karakter baris baru (\n)
+                    const lines = buffer.split("\n");
+
+                    // Potongan data terakhir mungkin belum lengkap, simpan kembali ke buffer
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        const cleanLine = line.trim();
+
+                        if (cleanLine) {
+                            const dataArray = cleanLine.split(",");
+
+                            // Pastikan urutan data yang masuk ada 5 (f1, f2, ax, ay, az)
+                            if (dataArray.length === 5) {
+                                setSensor({
+                                    flex1: parseInt(dataArray[0]),
+                                    flex2: parseInt(dataArray[1]),
+                                    ax: parseInt(dataArray[2]),
+                                    ay: parseInt(dataArray[3]),
+                                    az: parseInt(dataArray[4]),
+                                });
+                            }
+                        }
+                    }
+                }
             }
-
-            const payload = `${ssid}|${password}|${server}`;
-
-            const encoder = new TextEncoder();
-
-            await characteristic.writeValue(encoder.encode(payload));
-
-            toast.success("Konfigurasi berhasil dikirim");
-        } catch (err) {
-            console.log(err);
-
-            toast.error("Gagal mengirim konfigurasi");
+        } catch (error) {
+            console.error("Koneksi terputus atau gagal:", error);
+            setStatus("Offline");
         }
     };
 
     return (
-        <div className="p-8">
-            <Toaster />
+        <div className="p-6">
+            <h1 className="text-2xl font-bold mb-6">Device Setup</h1>
 
-            <div className="mb-8">
-                <h1 className="text-3xl font-bold text-cyan-600">
-                    Smart Glove Device Setup
-                </h1>
-
-                <p className="text-gray-500 mt-2">
-                    Konfigurasi WiFi dan API ESP32 via BLE
-                </p>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* FORM */}
-                <div className="lg:col-span-2 bg-white rounded-2xl shadow-lg p-6">
-                    <div className="flex items-center justify-between mb-6">
-                        <h2 className="text-xl font-semibold">
-                            Konfigurasi ESP32
-                        </h2>
-
-                        <div className="flex items-center gap-2">
-                            <div
-                                className={`w-3 h-3 rounded-full ${
-                                    connected ? "bg-green-500" : "bg-red-500"
-                                }`}
-                            />
-
-                            <span className="text-sm">
-                                {connected ? "Connected" : "Disconnected"}
-                            </span>
-                        </div>
-                    </div>
-
-                    {/* BUTTON CONNECT */}
-                    <button
-                        onClick={connectBluetooth}
-                        className="
-                            w-full
-                            py-3
-                            rounded-xl
-                            bg-cyan-600
-                            hover:bg-cyan-700
-                            text-white
-                            font-semibold
-                            transition
-                        "
-                    >
-                        Connect Smart Glove
-                    </button>
-
-                    {/* INPUT */}
-                    <div className="mt-6 space-y-5">
-                        <div>
-                            <label className="block mb-2 font-medium">
-                                WiFi SSID
-                            </label>
-
-                            <input
-                                type="text"
-                                value={ssid}
-                                onChange={(e) => setSsid(e.target.value)}
-                                className="
-                                    w-full
-                                    border
-                                    rounded-xl
-                                    px-4
-                                    py-3
-                                "
-                                placeholder="Nama WiFi"
-                            />
-                        </div>
-
-                        <div>
-                            <label className="block mb-2 font-medium">
-                                Password WiFi
-                            </label>
-
-                            <input
-                                type="password"
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                className="
-                                    w-full
-                                    border
-                                    rounded-xl
-                                    px-4
-                                    py-3
-                                "
-                                placeholder="Password WiFi"
-                            />
-                        </div>
-
-                        <div>
-                            <label className="block mb-2 font-medium">
-                                API URL
-                            </label>
-
-                            <input
-                                type="text"
-                                value={server}
-                                onChange={(e) => setServer(e.target.value)}
-                                className="
-                                    w-full
-                                    border
-                                    rounded-xl
-                                    px-4
-                                    py-3
-                                "
-                                placeholder="http://192.168..."
-                            />
-                        </div>
-
-                        <button
-                            onClick={saveConfig}
-                            className="
-                                w-full
-                                py-3
-                                rounded-xl
-                                bg-green-500
-                                hover:bg-green-600
-                                text-white
-                                font-semibold
-                            "
+            {/* Panel Status & Kontrol */}
+            <div className="bg-white rounded-xl shadow p-6 mb-6">
+                <div className="flex items-center justify-between mb-4">
+                    <div>
+                        <span className="font-semibold text-gray-700">
+                            Device Status:{" "}
+                        </span>
+                        <span
+                            className={`ml-2 font-bold ${status === "Connected" ? "text-green-600" : "text-red-500"}`}
                         >
-                            Simpan Konfigurasi
-                        </button>
+                            {status}
+                        </span>
                     </div>
-                </div>
 
-                {/* INFO */}
-                <div className="bg-white rounded-2xl shadow-lg p-6">
-                    <h2 className="text-xl font-semibold mb-5">
-                        Informasi Device
-                    </h2>
-
-                    <div className="space-y-4">
-                        <div>
-                            <p className="text-gray-500">Device Name</p>
-
-                            <p className="font-semibold">smartglove</p>
-                        </div>
-
-                        <div>
-                            <p className="text-gray-500">Microcontroller</p>
-
-                            <p className="font-semibold">ESP32</p>
-                        </div>
-
-                        <div>
-                            <p className="text-gray-500">Communication</p>
-
-                            <p className="font-semibold">BLE + WiFi</p>
-                        </div>
-                    </div>
+                    {/* Tombol Pemicu Koneksi USB */}
+                    <button
+                        onClick={connectGlove}
+                        className="px-5 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition"
+                    >
+                        {status === "Connected"
+                            ? "Membaca Data..."
+                            : "Hubungkan Smart Glove"}
+                    </button>
                 </div>
             </div>
+
+            {/* Panel Visualisasi Data */}
+            {sensor && status === "Connected" && (
+                <div className="bg-white rounded-xl shadow p-6 border-t-4 border-blue-500">
+                    <h2 className="font-semibold text-gray-800 mb-4">
+                        Live Sensor Data (20Hz)
+                    </h2>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                        <div className="p-4 bg-gray-50 rounded-lg border border-gray-100 shadow-sm text-center">
+                            <p className="text-sm text-gray-500 uppercase tracking-wider mb-1">
+                                Flex 1
+                            </p>
+                            <p className="text-2xl font-bold text-gray-800">
+                                {sensor.flex1}
+                            </p>
+                        </div>
+                        <div className="p-4 bg-gray-50 rounded-lg border border-gray-100 shadow-sm text-center">
+                            <p className="text-sm text-gray-500 uppercase tracking-wider mb-1">
+                                Flex 2
+                            </p>
+                            <p className="text-2xl font-bold text-gray-800">
+                                {sensor.flex2}
+                            </p>
+                        </div>
+                        <div className="p-4 bg-gray-50 rounded-lg border border-gray-100 shadow-sm text-center">
+                            <p className="text-sm text-gray-500 uppercase tracking-wider mb-1">
+                                Accel X
+                            </p>
+                            <p className="text-2xl font-bold text-gray-800">
+                                {sensor.ax}
+                            </p>
+                        </div>
+                        <div className="p-4 bg-gray-50 rounded-lg border border-gray-100 shadow-sm text-center">
+                            <p className="text-sm text-gray-500 uppercase tracking-wider mb-1">
+                                Accel Y
+                            </p>
+                            <p className="text-2xl font-bold text-gray-800">
+                                {sensor.ay}
+                            </p>
+                        </div>
+                        <div className="p-4 bg-gray-50 rounded-lg border border-gray-100 shadow-sm text-center">
+                            <p className="text-sm text-gray-500 uppercase tracking-wider mb-1">
+                                Accel Z
+                            </p>
+                            <p className="text-2xl font-bold text-gray-800">
+                                {sensor.az}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
